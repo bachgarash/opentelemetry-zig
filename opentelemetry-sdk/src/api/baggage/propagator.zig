@@ -10,7 +10,7 @@
 //!
 //! Example usage:
 //! ```zig
-//! const propagator = @import("opentelemetry").baggage.propagator;
+//! const propagator = @import("opentelemetry-sdk").api.baggage.propagator;
 //!
 //! // HTTP Header propagation
 //! var headers = std.StringHashMap([]const u8).init(allocator);
@@ -22,51 +22,7 @@ const std = @import("std");
 const EnvMap = std.process.Environ.Map;
 const Baggage = @import("../baggage.zig").Baggage;
 const BaggageEntry = @import("../baggage.zig").BaggageEntry;
-
-/// Generic interface for getting values from a carrier.
-///
-/// Implementations must provide methods to retrieve propagation data from
-/// carriers like HTTP headers or environment variables.
-pub fn TextMapGetter(comptime Carrier: type) type {
-    return struct {
-        /// Get a single value for a given key.
-        /// Returns null if the key doesn't exist.
-        /// Must be case-insensitive for HTTP carriers.
-        getFn: *const fn (carrier: *const Carrier, key: []const u8) ?[]const u8,
-
-        /// Get all keys available in the carrier.
-        /// Returns a slice of key names.
-        keysFn: *const fn (carrier: *const Carrier) []const []const u8,
-
-        const Self = @This();
-
-        pub fn get(self: Self, carrier: *const Carrier, key: []const u8) ?[]const u8 {
-            return self.getFn(carrier, key);
-        }
-
-        pub fn keys(self: Self, carrier: *const Carrier) []const []const u8 {
-            return self.keysFn(carrier);
-        }
-    };
-}
-
-/// Generic interface for setting values in a carrier.
-///
-/// Implementations must provide a method to inject propagation data into
-/// carriers like HTTP headers or environment variables.
-pub fn TextMapSetter(comptime Carrier: type) type {
-    return struct {
-        /// Set a key-value pair in the carrier.
-        /// Should preserve casing for the key.
-        setFn: *const fn (carrier: *Carrier, key: []const u8, value: []const u8) anyerror!void,
-
-        const Self = @This();
-
-        pub fn set(self: Self, carrier: *Carrier, key: []const u8, value: []const u8) !void {
-            return self.setFn(carrier, key, value);
-        }
-    };
-}
+const propagator = @import("../propagation.zig");
 
 /// W3C Baggage header name
 pub const baggage_header = "baggage";
@@ -135,7 +91,7 @@ pub fn inject(
     allocator: std.mem.Allocator,
     baggage: Baggage,
     carrier: anytype,
-    setter: TextMapSetter(@TypeOf(carrier.*)),
+    setter: propagator.TextMapSetter(@TypeOf(carrier.*)),
 ) !void {
     if (baggage.count() == 0) {
         return; // Nothing to inject
@@ -188,7 +144,7 @@ pub fn inject(
 pub fn extract(
     allocator: std.mem.Allocator,
     carrier: anytype,
-    getter: TextMapGetter(@TypeOf(carrier.*)),
+    getter: propagator.TextMapGetter(@TypeOf(carrier.*)),
 ) !?Baggage {
     const header_value = getter.get(carrier, baggage_header) orelse return null;
 
@@ -265,13 +221,13 @@ pub fn HttpHeaderSetter(headers: *std.StringHashMap([]const u8), key: []const u8
 }
 
 /// Create a TextMapGetter for StringHashMap-based HTTP headers
-pub const HttpGetter = TextMapGetter(std.StringHashMap([]const u8)){
+pub const HttpGetter = propagator.TextMapGetter(std.StringHashMap([]const u8)){
     .getFn = HttpHeaderGetter,
     .keysFn = HttpHeaderKeys,
 };
 
 /// Create a TextMapSetter for StringHashMap-based HTTP headers
-pub const HttpSetter = TextMapSetter(std.StringHashMap([]const u8)){
+pub const HttpSetter = propagator.TextMapSetter(std.StringHashMap([]const u8)){
     .setFn = HttpHeaderSetter,
 };
 
@@ -295,13 +251,13 @@ pub fn EnvironmentSetter(env_map: *EnvMap, key: []const u8, value: []const u8) !
 }
 
 /// Create a TextMapGetter for environment variables
-pub const EnvGetter = TextMapGetter(EnvMap){
+pub const EnvGetter = propagator.TextMapGetter(EnvMap){
     .getFn = EnvironmentGetter,
     .keysFn = EnvironmentKeys,
 };
 
 /// Create a TextMapSetter for environment variables
-pub const EnvSetter = TextMapSetter(EnvMap){
+pub const EnvSetter = propagator.TextMapSetter(EnvMap){
     .setFn = EnvironmentSetter,
 };
 
