@@ -85,7 +85,9 @@ pub const TraceState = struct {
         return self.entries.get(key);
     }
 
-    /// Add a new key/value pair. Returns a new TraceState with the addition.
+    /// Add a new key/value pair, replacing any existing entry for the same key.
+    /// Returns a new TraceState with the entry as the left-most list-member, as
+    /// required by https://www.w3.org/TR/trace-context/#mutating-the-tracestate-field
     /// Validates input according to W3C Trace Context specification.
     pub fn insert(self: Self, allocator: std.mem.Allocator, key: []const u8, value: []const u8) !Self {
         // Validate key according to W3C spec
@@ -93,32 +95,40 @@ pub const TraceState = struct {
         if (!isValidTraceStateValue(value)) return error.InvalidTraceStateValue;
 
         var new_state = Self.init(allocator);
+        errdefer new_state.deinit();
         try new_state.entries.ensureTotalCapacity(allocator, self.entries.count() + 1);
+
+        try new_state.entries.put(allocator, key, value);
 
         var iterator = self.entries.iterator();
         while (iterator.next()) |entry| {
+            if (std.mem.eql(u8, entry.key_ptr.*, key)) continue;
             try new_state.entries.put(allocator, entry.key_ptr.*, entry.value_ptr.*);
         }
-        try new_state.entries.put(allocator, key, value);
         return new_state;
     }
 
-    /// Update an existing value for a given key. Returns a new TraceState with the update.
+    /// Update an existing value for a given key. Returns a new TraceState with the
+    /// updated entry moved to the left-most position, as required by
+    /// https://www.w3.org/TR/trace-context/#mutating-the-tracestate-field
+    /// A key that is not already present is not created; the returned TraceState
+    /// is then an unchanged copy.
     /// Validates input according to W3C Trace Context specification.
     pub fn update(self: Self, allocator: std.mem.Allocator, key: []const u8, value: []const u8) !Self {
         if (!isValidTraceStateKey(key)) return error.InvalidTraceStateKey;
         if (!isValidTraceStateValue(value)) return error.InvalidTraceStateValue;
 
         var new_state = Self.init(allocator);
+        errdefer new_state.deinit();
         try new_state.entries.ensureTotalCapacity(allocator, self.entries.count());
+
+        const exists = self.entries.get(key) != null;
+        if (exists) try new_state.entries.put(allocator, key, value);
 
         var iterator = self.entries.iterator();
         while (iterator.next()) |entry| {
-            if (std.mem.eql(u8, entry.key_ptr.*, key)) {
-                try new_state.entries.put(allocator, key, value);
-            } else {
-                try new_state.entries.put(allocator, entry.key_ptr.*, entry.value_ptr.*);
-            }
+            if (exists and std.mem.eql(u8, entry.key_ptr.*, key)) continue;
+            try new_state.entries.put(allocator, entry.key_ptr.*, entry.value_ptr.*);
         }
         return new_state;
     }
@@ -544,4 +554,107 @@ test "TraceState validation" {
 
     // Test invalid value (contains equals)
     try std.testing.expectError(error.InvalidTraceStateValue, trace_state.insert(allocator, "key", "val=ue"));
+}
+
+test "TraceState insert puts new entries at the front" {
+    const allocator = std.testing.allocator;
+
+    var state = TraceState.init(allocator);
+    defer state.deinit();
+
+    for ([_][2][]const u8{
+        .{ "a", "1" },
+        .{ "b", "2" },
+        .{ "c", "3" },
+    }) |kv| {
+        const next = try state.insert(allocator, kv[0], kv[1]);
+        state.deinit();
+        state = next;
+    }
+
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &[_][]const u8{ "c", "b", "a" },
+        state.entries.keys(),
+    );
+}
+
+test "TraceState update moves the modified entry to the front" {
+    const allocator = std.testing.allocator;
+
+    // Follows the Congo/Rojo example from the W3C specification: a trace starts at
+    // congo, passes through other systems, then re-enters congo. A third vendor is
+    // present so that the re-entry has to move congo past an intervening entry.
+    var state = TraceState.init(allocator);
+    defer state.deinit();
+
+    for ([_][2][]const u8{
+        .{ "congo", "congosFirstPosition" },
+        .{ "rojo", "rojosFirstPosition" },
+        .{ "blue", "bluesFirstPosition" },
+    }) |kv| {
+        const next = try state.insert(allocator, kv[0], kv[1]);
+        state.deinit();
+        state = next;
+    }
+
+    const reentered = try state.update(allocator, "congo", "congosSecondPosition");
+    state.deinit();
+    state = reentered;
+
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &[_][]const u8{ "congo", "blue", "rojo" },
+        state.entries.keys(),
+    );
+    try std.testing.expectEqualStrings("congosSecondPosition", state.get("congo").?);
+    try std.testing.expectEqualStrings("rojosFirstPosition", state.get("rojo").?);
+}
+
+test "TraceState insert on an existing key replaces it and moves it to the front" {
+    const allocator = std.testing.allocator;
+
+    var state = TraceState.init(allocator);
+    defer state.deinit();
+
+    for ([_][2][]const u8{
+        .{ "vendor", "first" },
+        .{ "other", "value" },
+        .{ "third", "value" },
+    }) |kv| {
+        const next = try state.insert(allocator, kv[0], kv[1]);
+        state.deinit();
+        state = next;
+    }
+
+    const replaced = try state.insert(allocator, "vendor", "second");
+    state.deinit();
+    state = replaced;
+
+    try std.testing.expectEqual(@as(usize, 3), state.entries.count());
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &[_][]const u8{ "vendor", "third", "other" },
+        state.entries.keys(),
+    );
+    try std.testing.expectEqualStrings("second", state.get("vendor").?);
+}
+
+test "TraceState update leaves an absent key unchanged" {
+    const allocator = std.testing.allocator;
+
+    var state = TraceState.init(allocator);
+    defer state.deinit();
+
+    const with_entry = try state.insert(allocator, "present", "value");
+    state.deinit();
+    state = with_entry;
+
+    const unchanged = try state.update(allocator, "absent", "value");
+    state.deinit();
+    state = unchanged;
+
+    try std.testing.expectEqual(@as(usize, 1), state.entries.count());
+    try std.testing.expect(state.get("absent") == null);
+    try std.testing.expectEqualStrings("value", state.get("present").?);
 }
