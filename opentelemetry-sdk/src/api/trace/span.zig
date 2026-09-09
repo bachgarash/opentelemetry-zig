@@ -111,15 +111,21 @@ pub const TraceState = struct {
     /// Append a key/value pair as the right-most list-member, keeping the order in
     /// which entries are added. Unlike `insert`, this does not apply the W3C rule of
     /// moving the entry to the front: that rule governs mutations, while this exists
-    /// to rebuild a TraceState from a received `tracestate` header, where the order
-    /// of the list-members on the wire must be preserved verbatim.
+    /// to rebuild a TraceState from a serialized `tracestate`, where the order of the
+    /// list-members must be preserved verbatim.
     /// A key that is already present keeps its position and takes the new value.
+    /// W3C allows only one entry per key, so a caller parsing an untrusted header is
+    /// responsible for deciding what a duplicate means: the spec lets a vendor drop
+    /// the offending entry or the whole header, and this returns neither.
+    /// Unlike the methods returning a new TraceState, this mutates in place and so
+    /// allocates with the allocator the TraceState was initialized with, the same one
+    /// `deinit` frees with.
     /// Validates input according to W3C Trace Context specification.
-    pub fn append(self: *Self, allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
+    pub fn append(self: *Self, key: []const u8, value: []const u8) !void {
         if (!isValidTraceStateKey(key)) return error.InvalidTraceStateKey;
         if (!isValidTraceStateValue(value)) return error.InvalidTraceStateValue;
 
-        try self.entries.put(allocator, key, value);
+        try self.entries.put(self.allocator, key, value);
     }
 
     /// Update an existing value for a given key. Returns a new TraceState with the
@@ -695,7 +701,7 @@ test "TraceState append keeps entries in the order they are added" {
         .{ "rojo", "rojosFirstPosition" },
         .{ "blue", "bluesFirstPosition" },
     }) |kv| {
-        try state.append(allocator, kv[0], kv[1]);
+        try state.append(kv[0], kv[1]);
     }
 
     try expectTraceStateEntries(&.{
@@ -711,9 +717,9 @@ test "TraceState append on an existing key replaces it in place" {
     var state = TraceState.init(allocator);
     defer state.deinit();
 
-    try state.append(allocator, "vendor", "first");
-    try state.append(allocator, "other", "value");
-    try state.append(allocator, "vendor", "second");
+    try state.append("vendor", "first");
+    try state.append("other", "value");
+    try state.append("vendor", "second");
 
     try expectTraceStateEntries(&.{
         .{ "vendor", "second" },
@@ -727,7 +733,7 @@ test "TraceState append validates keys and values" {
     var state = TraceState.init(allocator);
     defer state.deinit();
 
-    try std.testing.expectError(error.InvalidTraceStateKey, state.append(allocator, "Key", "value"));
-    try std.testing.expectError(error.InvalidTraceStateValue, state.append(allocator, "key", "val,ue"));
+    try std.testing.expectError(error.InvalidTraceStateKey, state.append("Key", "value"));
+    try std.testing.expectError(error.InvalidTraceStateValue, state.append("key", "val,ue"));
     try std.testing.expectEqual(@as(usize, 0), state.entries.count());
 }

@@ -139,7 +139,7 @@ fn deserializeField(allocator: std.mem.Allocator, comptime T: type, attr_value: 
                     // `append` rather than `insert` because the list-members are read
                     // left-to-right and must keep the order they had on the wire.
                     // `insert` would move each one to the front, reversing them.
-                    trace_state.append(allocator, key, value) catch continue;
+                    trace_state.append(key, value) catch continue;
                 }
             }
 
