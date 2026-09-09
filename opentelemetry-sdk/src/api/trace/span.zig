@@ -108,6 +108,20 @@ pub const TraceState = struct {
         return new_state;
     }
 
+    /// Append a key/value pair as the right-most list-member, keeping the order in
+    /// which entries are added. Unlike `insert`, this does not apply the W3C rule of
+    /// moving the entry to the front: that rule governs mutations, while this exists
+    /// to rebuild a TraceState from a received `tracestate` header, where the order
+    /// of the list-members on the wire must be preserved verbatim.
+    /// A key that is already present keeps its position and takes the new value.
+    /// Validates input according to W3C Trace Context specification.
+    pub fn append(self: *Self, allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
+        if (!isValidTraceStateKey(key)) return error.InvalidTraceStateKey;
+        if (!isValidTraceStateValue(value)) return error.InvalidTraceStateValue;
+
+        try self.entries.put(allocator, key, value);
+    }
+
     /// Update an existing value for a given key. Returns a new TraceState with the
     /// updated entry moved to the left-most position, as required by
     /// https://www.w3.org/TR/trace-context/#mutating-the-tracestate-field
@@ -556,6 +570,18 @@ test "TraceState validation" {
     try std.testing.expectError(error.InvalidTraceStateValue, trace_state.insert(allocator, "key", "val=ue"));
 }
 
+/// Assert that a TraceState holds exactly the given key/value pairs, in order.
+/// Compares the keys and values by content: `expectEqualSlices` over `[]const u8`
+/// elements compares the slices by pointer, which only holds for deduplicated
+/// string literals and not for keys pointing into a parsed `tracestate` header.
+pub fn expectTraceStateEntries(expected: []const [2][]const u8, state: TraceState) !void {
+    try std.testing.expectEqual(expected.len, state.entries.count());
+    for (expected, state.entries.keys(), state.entries.values()) |kv, key, value| {
+        try std.testing.expectEqualStrings(kv[0], key);
+        try std.testing.expectEqualStrings(kv[1], value);
+    }
+}
+
 test "TraceState insert puts new entries at the front" {
     const allocator = std.testing.allocator;
 
@@ -572,11 +598,11 @@ test "TraceState insert puts new entries at the front" {
         state = next;
     }
 
-    try std.testing.expectEqualSlices(
-        []const u8,
-        &[_][]const u8{ "c", "b", "a" },
-        state.entries.keys(),
-    );
+    try expectTraceStateEntries(&.{
+        .{ "c", "3" },
+        .{ "b", "2" },
+        .{ "a", "1" },
+    }, state);
 }
 
 test "TraceState update moves the modified entry to the front" {
@@ -602,13 +628,11 @@ test "TraceState update moves the modified entry to the front" {
     state.deinit();
     state = reentered;
 
-    try std.testing.expectEqualSlices(
-        []const u8,
-        &[_][]const u8{ "congo", "blue", "rojo" },
-        state.entries.keys(),
-    );
-    try std.testing.expectEqualStrings("congosSecondPosition", state.get("congo").?);
-    try std.testing.expectEqualStrings("rojosFirstPosition", state.get("rojo").?);
+    try expectTraceStateEntries(&.{
+        .{ "congo", "congosSecondPosition" },
+        .{ "blue", "bluesFirstPosition" },
+        .{ "rojo", "rojosFirstPosition" },
+    }, state);
 }
 
 test "TraceState insert on an existing key replaces it and moves it to the front" {
@@ -631,13 +655,11 @@ test "TraceState insert on an existing key replaces it and moves it to the front
     state.deinit();
     state = replaced;
 
-    try std.testing.expectEqual(@as(usize, 3), state.entries.count());
-    try std.testing.expectEqualSlices(
-        []const u8,
-        &[_][]const u8{ "vendor", "third", "other" },
-        state.entries.keys(),
-    );
-    try std.testing.expectEqualStrings("second", state.get("vendor").?);
+    try expectTraceStateEntries(&.{
+        .{ "vendor", "second" },
+        .{ "third", "value" },
+        .{ "other", "value" },
+    }, state);
 }
 
 test "TraceState update leaves an absent key unchanged" {
@@ -654,7 +676,58 @@ test "TraceState update leaves an absent key unchanged" {
     state.deinit();
     state = unchanged;
 
-    try std.testing.expectEqual(@as(usize, 1), state.entries.count());
-    try std.testing.expect(state.get("absent") == null);
-    try std.testing.expectEqualStrings("value", state.get("present").?);
+    try expectTraceStateEntries(&.{
+        .{ "present", "value" },
+    }, state);
+}
+
+test "TraceState append keeps entries in the order they are added" {
+    const allocator = std.testing.allocator;
+
+    // Deserializing a `tracestate` header replays the list-members left-to-right,
+    // so `append` must leave them where they were rather than moving each to the
+    // front the way `insert` does.
+    var state = TraceState.init(allocator);
+    defer state.deinit();
+
+    for ([_][2][]const u8{
+        .{ "congo", "congosFirstPosition" },
+        .{ "rojo", "rojosFirstPosition" },
+        .{ "blue", "bluesFirstPosition" },
+    }) |kv| {
+        try state.append(allocator, kv[0], kv[1]);
+    }
+
+    try expectTraceStateEntries(&.{
+        .{ "congo", "congosFirstPosition" },
+        .{ "rojo", "rojosFirstPosition" },
+        .{ "blue", "bluesFirstPosition" },
+    }, state);
+}
+
+test "TraceState append on an existing key replaces it in place" {
+    const allocator = std.testing.allocator;
+
+    var state = TraceState.init(allocator);
+    defer state.deinit();
+
+    try state.append(allocator, "vendor", "first");
+    try state.append(allocator, "other", "value");
+    try state.append(allocator, "vendor", "second");
+
+    try expectTraceStateEntries(&.{
+        .{ "vendor", "second" },
+        .{ "other", "value" },
+    }, state);
+}
+
+test "TraceState append validates keys and values" {
+    const allocator = std.testing.allocator;
+
+    var state = TraceState.init(allocator);
+    defer state.deinit();
+
+    try std.testing.expectError(error.InvalidTraceStateKey, state.append(allocator, "Key", "value"));
+    try std.testing.expectError(error.InvalidTraceStateValue, state.append(allocator, "key", "val,ue"));
+    try std.testing.expectEqual(@as(usize, 0), state.entries.count());
 }
