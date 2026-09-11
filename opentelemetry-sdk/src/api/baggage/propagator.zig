@@ -194,42 +194,13 @@ pub fn extract(
     return baggage;
 }
 
-// HTTP Header Carriers
+// HTTP Header Carriers (re-exported from the shared propagation module)
 
-/// StringHashMap-based HTTP header carrier getter
-pub fn HttpHeaderGetter(headers: *const std.StringHashMap([]const u8), key: []const u8) ?[]const u8 {
-    // Case-insensitive lookup
-    var it = headers.iterator();
-    while (it.next()) |entry| {
-        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, key)) {
-            return entry.value_ptr.*;
-        }
-    }
-    return null;
-}
-
-/// Get all keys from HTTP headers (for StringHashMap carrier)
-pub fn HttpHeaderKeys(headers: *const std.StringHashMap([]const u8)) []const []const u8 {
-    _ = headers;
-    // Return empty slice - keys() method not needed for basic propagation
-    return &[_][]const u8{};
-}
-
-/// StringHashMap-based HTTP header carrier setter
-pub fn HttpHeaderSetter(headers: *std.StringHashMap([]const u8), key: []const u8, value: []const u8) !void {
-    try headers.put(key, value);
-}
-
-/// Create a TextMapGetter for StringHashMap-based HTTP headers
-pub const HttpGetter = propagator.TextMapGetter(std.StringHashMap([]const u8)){
-    .getFn = HttpHeaderGetter,
-    .keysFn = HttpHeaderKeys,
-};
-
-/// Create a TextMapSetter for StringHashMap-based HTTP headers
-pub const HttpSetter = propagator.TextMapSetter(std.StringHashMap([]const u8)){
-    .setFn = HttpHeaderSetter,
-};
+pub const HttpHeaderGetter = propagator.HttpHeaderGetter;
+pub const HttpHeaderKeys = propagator.HttpHeaderKeys;
+pub const HttpHeaderSetter = propagator.HttpHeaderSetter;
+pub const HttpGetter = propagator.HttpGetter;
+pub const HttpSetter = propagator.HttpSetter;
 
 // Environment Variable Carriers
 

@@ -276,6 +276,7 @@ test {
     _ = @import("trace/code.zig");
     _ = @import("trace/config.zig");
     _ = @import("trace/link.zig");
+    _ = @import("trace/propagator.zig");
     _ = @import("trace/span.zig");
     _ = @import("trace/tracer.zig");
     _ = @import("trace/trace_flags.zig");
