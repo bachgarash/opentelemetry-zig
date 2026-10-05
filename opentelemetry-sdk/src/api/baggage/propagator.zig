@@ -190,8 +190,10 @@ pub fn extract(
     return baggage;
 }
 
-// HTTP Header Carriers (re-exported from the shared propagation module)
+// Carriers (re-exported from the shared propagation module)
 
+pub const TextMapGetter = propagator.TextMapGetter;
+pub const TextMapSetter = propagator.TextMapSetter;
 pub const HttpHeaderGetter = propagator.HttpHeaderGetter;
 pub const HttpHeaderKeys = propagator.HttpHeaderKeys;
 pub const HttpHeaderSetter = propagator.HttpHeaderSetter;

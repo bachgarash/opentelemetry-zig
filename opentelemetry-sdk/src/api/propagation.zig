@@ -68,7 +68,8 @@ pub fn HttpHeaderGetter(headers: *const std.StringHashMap([]const u8), key: []co
 /// Get all keys from HTTP headers (for StringHashMap carrier)
 pub fn HttpHeaderKeys(headers: *const std.StringHashMap([]const u8)) []const []const u8 {
     _ = headers;
-    // Return empty slice - keys() method not needed for basic propagation
+    // TODO: return the header names. Building the slice needs an allocator,
+    // which `keysFn` does not take yet; that signature change is a follow-up.
     return &[_][]const u8{};
 }
 

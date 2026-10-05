@@ -63,7 +63,7 @@ const traceparent_length = 55;
 /// Maximum number of list-members in a tracestate header
 const max_tracestate_members = 32;
 
-/// Trace flags defined by the spec; unknown bits are dropped on extract
+/// Trace flags defined by the spec; unknown bits are dropped on extract and zeroed on inject
 const known_trace_flags: u8 = TraceFlags.SAMPLED_FLAG | TraceFlags.RANDOM_FLAG;
 
 /// Optional whitespace allowed around header values and tracestate list-members
@@ -134,7 +134,7 @@ fn formatTraceparent(allocator: std.mem.Allocator, span_context: SpanContext) ![
         supported_version,
         span_context.getTraceId().toHex(&trace_id_buf),
         span_context.getSpanId().toHex(&span_id_buf),
-        span_context.getTraceFlags().value,
+        span_context.getTraceFlags().value & known_trace_flags,
     });
 }
 
@@ -309,6 +309,23 @@ test "inject writes unsampled flags" {
 
     try std.testing.expectEqualStrings(
         "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00",
+        headers.get(traceparent_header).?,
+    );
+}
+
+test "inject zeroes unknown trace flags" {
+    const allocator = std.testing.allocator;
+
+    var trace_state = TraceState.init(allocator);
+    defer trace_state.deinit();
+
+    var headers = Headers.init(allocator);
+    defer freeInjectedHeaders(&headers);
+
+    try inject(allocator, try testSpanContext(trace_state, TraceFlags.init(0xff)), &headers, propagation.HttpSetter);
+
+    try std.testing.expectEqualStrings(
+        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-03",
         headers.get(traceparent_header).?,
     );
 }
