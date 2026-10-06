@@ -145,6 +145,8 @@ pub const MeterProvider = struct {
 
     /// Register a view with this meter provider
     pub fn addView(self: *Self, new_view: view.View) !void {
+        try new_view.aggregation.validate();
+
         self.mx.lockUncancelable(self.io);
         defer self.mx.unlock(self.io);
 
@@ -699,16 +701,25 @@ pub const AggregatedMetrics = struct {
 
         var results = std.ArrayList(Measurements).empty;
 
+        errdefer {
+            for (results.items) |*r| {
+                r.deinit(allocator);
+            }
+            results.deinit(allocator);
+        }
+
         var iter = meter.instruments.valueIterator();
         while (iter.next()) |instr| {
-            // Get the data points from the instrument and reset their state,
-            const data_points: MeasurementsData = try instr.*.getInstrumentsData(allocator);
-
             // Determine aggregation: override takes precedence over view system
             const aggregation_type = if (aggregation_override) |override_fn|
                 override_fn(instr.*.kind)
             else
                 view.aggregationForViews(views, instr.*, &meter.scope);
+
+            try aggregation_type.validate();
+
+            // Get the data points from the instrument and reset their state,
+            const data_points: MeasurementsData = try instr.*.getInstrumentsData(allocator);
 
             const aggregated_data = try aggregate(allocator, data_points, aggregation_type);
             // then fill the result with the aggregated data points
@@ -823,6 +834,91 @@ test "aggregated metrics fetch to owned slice" {
     try std.testing.expectEqual(4, result[0].data.int[0].value);
 }
 
+test "fetch validates exponential histogram max_size" {
+    const io = std.testing.io;
+    const mp = try MeterProvider.init(std.testing.allocator, io);
+    defer mp.shutdown();
+
+    const meter = try mp.getMeter(.{ .name = "test" });
+    var histogram = try meter.createHistogram(f64, .{ .name = "test_histogram" });
+    try histogram.record(1.0, .{});
+    try histogram.record(2.0, .{});
+
+    inline for (0..3) |max_size| {
+        const aggregation_selector = struct {
+            fn selectAggregation(_: Kind) view.Aggregation {
+                return .{ .ExponentialBucketHistogram = .{
+                    .max_scale = 10,
+                    .max_size = max_size,
+                    .record_min_max = false,
+                } };
+            }
+        }.selectAggregation;
+
+        const result = AggregatedMetrics.fetch(
+            std.testing.allocator,
+            meter,
+            mp.views.items,
+            aggregation_selector,
+        );
+
+        if (max_size != 2) {
+            try std.testing.expectError(error.InvalidMaxSize, result);
+            continue;
+        }
+        const arr = try result;
+        defer {
+            for (arr) |m| {
+                var data = m;
+                data.deinit(std.testing.allocator);
+            }
+            std.testing.allocator.free(arr);
+        }
+
+        try std.testing.expectEqual(1, arr.len);
+        try std.testing.expectEqual(1, arr[0].data.exponential_histogram.len);
+        try std.testing.expectEqual(2, arr[0].data.exponential_histogram[0].value.count);
+        try std.testing.expectEqual(3, arr[0].data.exponential_histogram[0].value.sum);
+    }
+}
+
+test "fetch frees accumulated results on validation failure" {
+    const io = std.testing.io;
+    const mp = try MeterProvider.init(std.testing.allocator, io);
+    defer mp.shutdown();
+
+    const meter = try mp.getMeter(.{ .name = "test" });
+    const histogram = try meter.createHistogram(f64, .{ .name = "test_histogram" });
+    try histogram.record(1.0, .{});
+    var counter = try meter.createCounter(u64, .{ .name = "test-counter" });
+    try counter.add(1, .{});
+
+    var iter = meter.instruments.valueIterator();
+    _ = iter.next() orelse unreachable;
+    const second_instrument = iter.next() orelse unreachable;
+
+    const invalid_view = view.View{
+        .instrument_selector = .{
+            .name = second_instrument.*.opts.name,
+        },
+        .aggregation = .{ .ExponentialBucketHistogram = .{
+            .max_scale = 10,
+            .max_size = 1,
+            .record_min_max = false,
+        } },
+        .temporality = .Cumulative,
+    };
+
+    const result = AggregatedMetrics.fetch(
+        std.testing.allocator,
+        meter,
+        &.{invalid_view},
+        null,
+    );
+
+    try std.testing.expectError(error.InvalidMaxSize, result);
+}
+
 test "aggregated metrics do not duplicate data points" {
     const io = std.testing.io;
     const mp = try MeterProvider.init(std.testing.allocator, io);
@@ -914,6 +1010,54 @@ test "aggregated metrics with custom views" {
     const result_with_views = try AggregatedMetrics.fetch(std.testing.allocator, meter, mp.views.items, null);
     defer std.testing.allocator.free(result_with_views);
     try std.testing.expectEqual(0, result_with_views.len);
+}
+
+test "meter provider validates exponential histogram view max_size" {
+    const io = std.testing.io;
+    const mp = try MeterProvider.init(std.testing.allocator, io);
+    defer mp.shutdown();
+
+    const view_max_size_0 = view.View{
+        .instrument_selector = .{ .kind = .Histogram },
+        .aggregation = .{ .ExponentialBucketHistogram = .{
+            .max_scale = 10,
+            .max_size = 0,
+            .record_min_max = false,
+        } },
+        .temporality = .Cumulative,
+    };
+
+    const registration_result_0 = mp.addView(view_max_size_0);
+    try std.testing.expectEqual(error.InvalidMaxSize, registration_result_0);
+
+    const view_max_size_1 = view.View{
+        .instrument_selector = .{ .kind = .Histogram },
+        .aggregation = .{ .ExponentialBucketHistogram = .{
+            .max_scale = 10,
+            .max_size = 1,
+            .record_min_max = false,
+        } },
+        .temporality = .Cumulative,
+    };
+    const registration_result_1 = mp.addView(view_max_size_1);
+    try std.testing.expectEqual(error.InvalidMaxSize, registration_result_1);
+
+    const view_max_size_2 = view.View{
+        .instrument_selector = .{ .kind = .Histogram },
+        .aggregation = .{ .ExponentialBucketHistogram = .{
+            .max_scale = 10,
+            .max_size = 2,
+            .record_min_max = false,
+        } },
+        .temporality = .Cumulative,
+    };
+
+    try mp.addView(view_max_size_2);
+    try std.testing.expectEqual(1, mp.views.items.len);
+    try std.testing.expectEqual(view.AggregationType.ExponentialBucketHistogram, mp.views.items[0].aggregation.getType());
+    try std.testing.expectEqual(10, mp.views.items[0].aggregation.ExponentialBucketHistogram.max_scale);
+    try std.testing.expectEqual(2, mp.views.items[0].aggregation.ExponentialBucketHistogram.max_size);
+    try std.testing.expectEqual(false, mp.views.items[0].aggregation.ExponentialBucketHistogram.record_min_max);
 }
 
 test "view associated with meter provider" {

@@ -133,7 +133,7 @@ fn exponentialBucketHistogramExample(allocator: std.mem.Allocator, io: std.Io, m
     // Create a view for histogram instruments with exponential bucket aggregation
     const exponential_view = view.View{
         .instrument_selector = .{ .kind = .Histogram, .name = "memory_usage_bytes_exp" },
-        .aggregation = .{ .ExponentialBucketHistogram = .{} },
+        .aggregation = .{ .ExponentialBucketHistogram = try view.ExponentialBucketHistogramConfig.init(.{}) },
         .temporality = .Cumulative,
     };
 
