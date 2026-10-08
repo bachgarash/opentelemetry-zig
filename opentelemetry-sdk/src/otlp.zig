@@ -47,6 +47,7 @@ pub const ConfigError = error{
     InvalidWireFormatForClient,
     InvalidCompression,
     InvalidProtocol,
+    TimeoutSecTooBig,
 };
 
 /// Error set for the OTLP Export operation.
@@ -60,6 +61,8 @@ pub const ExportError = error{
     RetryableStatusCodeInResponse,
     UnimplementedTransportProtocol,
     NonRetryableStatusCodeInResponse,
+    /// The request did not complete within `ConfigOptions.timeout_sec`.
+    Timeout,
 };
 
 /// The combination of underlying transport protocol and format used to send the data.
@@ -240,6 +243,8 @@ pub const ConfigOptions = struct {
     // Tracks whether `endpoint` was allocated by us and must be freed on deinit.
     endpoint_owned: bool = false,
 
+    const max_timeout_sec = 600;
+
     pub fn init(allocator: std.mem.Allocator, env_map: *const EnvMap) !*ConfigOptions {
         const s = try allocator.create(ConfigOptions);
         s.* = ConfigOptions{
@@ -267,6 +272,9 @@ pub const ConfigOptions = struct {
             if (self.insecure) |ins| {
                 if (ins) return ConfigError.ConflictingOptions;
             }
+        }
+        if (self.timeout_sec > max_timeout_sec) {
+            return ConfigError.TimeoutSecTooBig;
         }
     }
 
@@ -594,6 +602,18 @@ const HTTPClient = struct {
         return request_options;
     }
 
+    // std.http.Client has no request timeout: the only `timeout` field
+    // is on ConnectTcpOptions and is never forwarded to the connect call,
+    // so the deadline has to be imposed from outside.
+    fn fetchBounded(self: *Self, opts: http.Client.FetchOptions) !http.Client.FetchResult {
+        return clock.callTimeout(
+            self.client.io,
+            self.config.timeout_sec * std.time.ms_per_s,
+            http.Client.fetch,
+            .{ &self.client, opts },
+        );
+    }
+
     // Send the OTLP data to the url using the client's configuration.
     // Data passed as argument should either be protobuf or JSON encoded, as specified in the config.
     // Data will be compressed here.
@@ -623,13 +643,14 @@ const HTTPClient = struct {
             .payload = req_body,
         };
 
-        const response = self.client.fetch(fetch_request) catch |err| {
+        const response = self.fetchBounded(fetch_request) catch |err| {
             // Handle connection errors that occur before getting a response
             switch (err) {
                 error.HttpConnectionClosing, error.ReadFailed, error.ConnectionResetByPeer => {
                     // These are connection-level errors that should be treated as non-retryable
                     return ExportError.NonRetryableStatusCodeInResponse;
                 },
+                error.Timeout => return ExportError.Timeout,
                 else => return err,
             }
         };
