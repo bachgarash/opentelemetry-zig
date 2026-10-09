@@ -258,6 +258,10 @@ pub const Span = struct {
     /// True when `span_context.trace_state` was allocated for this span, e.g. by
     /// the SDK tracer, and must be released by `deinit`
     owns_trace_state: bool = false,
+    /// The Tracer that started this Span, set by the SDK so that end() can
+    /// notify it. Null for spans created through the API alone, and for the
+    /// copies handed over to span processors.
+    tracer: ?*trace.TracerImpl = null,
 
     const Self = @This();
 
@@ -476,14 +480,15 @@ pub const Span = struct {
         try self.events.append(self.allocator, event);
     }
 
-    /// End the Span
-    /// NOTE: This does not notify span processors. Use Tracer.endSpan to end a
-    /// span through the SDK; calling this first makes that call a no-op.
+    /// End the Span, notifying the span processors registered on the SDK
+    /// Tracer that started it. Ending a Span twice is a no-op.
     pub fn end(self: *Self, timestamp: ?u64) void {
         if (!self.is_recording) return;
 
         self.end_time_unix_nano = timestamp orelse @as(u64, @intCast(clock.nanoTimestamp()));
         self.is_recording = false;
+
+        if (self.tracer) |tracer| tracer.onEnd(self);
     }
 };
 

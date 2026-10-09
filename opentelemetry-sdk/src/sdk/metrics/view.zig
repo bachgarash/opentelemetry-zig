@@ -146,12 +146,34 @@ pub const ExplicitBucketHistogramConfig = struct {
 
 /// Configuration for exponential bucket histogram aggregation
 pub const ExponentialBucketHistogramConfig = struct {
-    /// Maximum scale parameter (determines bucket resolution)
-    max_scale: i32 = 20,
-    /// Maximum number of buckets before scale reduction
-    max_size: u32 = 1024,
-    /// Whether to record min and max values
-    record_min_max: bool = true,
+    max_scale: i32,
+    max_size: u32,
+    record_min_max: bool,
+
+    pub const Options = struct {
+        /// Maximum scale parameter (determines bucket resolution)
+        max_scale: i32 = 20,
+        /// Maximum number of buckets before scale reduction (minimum is 2)
+        max_size: u32 = 1024,
+        /// Whether to record min and max values
+        record_min_max: bool = true,
+    };
+
+    pub fn init(options: Options) !ExponentialBucketHistogramConfig {
+        const config = ExponentialBucketHistogramConfig{
+            .max_scale = options.max_scale,
+            .max_size = options.max_size,
+            .record_min_max = options.record_min_max,
+        };
+        try config.validate();
+        return config;
+    }
+
+    pub fn validate(self: ExponentialBucketHistogramConfig) !void {
+        if (self.max_size < 2) {
+            return error.InvalidMaxSize;
+        }
+    }
 };
 
 /// Defines the ways and means to compute aggregated metrics.
@@ -173,6 +195,14 @@ pub const Aggregation = union(enum) {
             .ExplicitBucketHistogram => .ExplicitBucketHistogram,
             .ExponentialBucketHistogram => .ExponentialBucketHistogram,
         };
+    }
+
+    pub fn validate(self: Aggregation) !void {
+        switch (self) {
+            .Drop, .Sum, .LastValue => {},
+            .ExplicitBucketHistogram => {},
+            .ExponentialBucketHistogram => |config| try config.validate(),
+        }
     }
 };
 
@@ -344,3 +374,33 @@ pub fn temporalityForViews(views: []const View, instr: *const Instrument, scope:
 }
 
 const MeterProvider = @import("../../api/metrics/meter.zig").MeterProvider;
+
+test "ExponentialBucketHistogramConfig.init defaults" {
+    const config = try ExponentialBucketHistogramConfig.init(.{});
+    try std.testing.expectEqual(20, config.max_scale);
+    try std.testing.expectEqual(1024, config.max_size);
+    try std.testing.expectEqual(true, config.record_min_max);
+}
+
+test "ExponentialBucketHistogramConfig.init custom values" {
+    const config = try ExponentialBucketHistogramConfig.init(.{
+        .max_scale = 3,
+        .max_size = 2,
+        .record_min_max = false,
+    });
+    try std.testing.expectEqual(3, config.max_scale);
+    try std.testing.expectEqual(2, config.max_size);
+    try std.testing.expectEqual(false, config.record_min_max);
+}
+
+test "ExponentialBucketHistogramConfig.init invalid max_size" {
+    const max_sizes = [_]u32{ 0, 1 };
+    for (max_sizes) |size| {
+        const err = ExponentialBucketHistogramConfig.init(.{
+            .max_scale = 3,
+            .max_size = size,
+            .record_min_max = true,
+        });
+        try std.testing.expectError(error.InvalidMaxSize, err);
+    }
+}
