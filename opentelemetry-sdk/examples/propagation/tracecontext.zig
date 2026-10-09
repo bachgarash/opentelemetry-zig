@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
     var tracer_provider = try trace.TracerProvider.init(allocator, init.io, .{
         .Random = trace.RandomIDGenerator.init(prng.random()),
     });
-    defer tracer_provider.shutdown();
+    defer tracer_provider.deinit();
 
     const tracer = try tracer_provider.getTracer(.{ .name = "tracecontext-example", .version = "1.0.0" });
 
